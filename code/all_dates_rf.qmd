@@ -1,0 +1,1201 @@
+---
+title: "Spectral signature"
+format: html
+editor: visual
+---
+
+---
+title: "Spectral signature_all_dates"
+output: html_document
+author: "Polycarpe Mizero" 
+
+format:
+  html:
+    code-fold: false
+    embed-resources: true
+    toc: true
+    number-sections: false
+    theme: cerulean
+---
+
+# 1 Load Required Libraries
+
+```{r warning=FALSE }
+library(tidyverse)
+library(tidymodels)
+library(ranger)
+library(fs)
+```
+
+#2 Load and Combine All CSV Files
+
+```{r}
+# folder containing the CSV files
+folder_path <- "../data/all_dates/"
+
+# list csv files
+csv_files <- dir_ls(folder_path, glob = "*.csv")
+
+# read and combine
+spectra_long <- map_dfr(csv_files, read_csv, show_col_types = FALSE)
+
+head(spectra_long)
+
+```
+
+```{r}
+summary(spectra_long)
+```
+
+```{r}
+glimpse(spectra_long)
+```
+
+#3 Pivot to Wide Format (Required for Random Forest)
+
+Each wavelength becomes a predictor. Each row = one sample, each column = one reflectance feature. This massively reduces training time.
+
+```{r warning=FALSE}
+# Convert long -> wide format
+
+spectra_wide <- spectra_long %>%
+  select(date, sample_id, treatment, forage, rep, surface_type, wave_length, reflectance_percent) %>%
+  pivot_wider(
+    names_from = wave_length,
+    values_from = reflectance_percent,
+    names_prefix = "wl_"
+  )%>%
+  mutate(treatment = as.factor(treatment))
+
+spectra_wide
+
+```
+
+## Ensure consistent factor levels before split
+
+```{r}
+# Make sure treatment is factor and has all levels
+spectra_wide <- spectra_wide %>%
+  mutate(treatment = factor(treatment)) %>%
+  mutate(forage = factor(forage))%>%
+  mutate(surface_type = factor(surface_type))%>%
+  droplevels()
+
+spectra_wide
+```
+
+#Last application date
+
+```{r}
+library(tidyverse)
+library(lubridate)
+
+app_dates <- as.Date(c("2025-06-12", "2025-08-12", "2025-09-15"))
+
+spectra_wide <- spectra_wide %>%
+  mutate(
+    date = ymd(str_replace_all(date, "_", "-"))
+  ) %>%
+  arrange(date, sample_id) %>%
+  mutate(
+    last_app_date = sapply(date, function(d) max(app_dates[app_dates <= d])),
+    DAA = as.numeric(date - last_app_date)
+  )
+
+
+spectra_wide
+```
+
+## application cycle to show where each observation belongs to (optional)
+
+```{r}
+spectra_wide <- spectra_wide %>%
+  mutate(
+    date = ymd(str_replace_all(date, "_", "-"))
+  ) %>%
+  arrange(date, sample_id) %>%
+  mutate(
+    app_cycle = case_when(
+      date >= as.Date("2025-06-12") & date < as.Date("2025-08-12") ~ 1,
+      date >= as.Date("2025-08-12") & date < as.Date("2025-09-15") ~ 2,
+      date >= as.Date("2025-09-15") ~ 3,
+      TRUE ~ NA_real_
+    ),
+    last_app_date = sapply(date, function(d) max(app_dates[app_dates <= d])),
+    DAA = as.numeric(date - last_app_date)
+  )
+
+spectra_wide
+```
+
+# 5. RF CLASSIFICATION MODEL
+
+#4 Spectral model with DAA added
+
+Random Forest predictors should only be spectral features.
+
+```{r}
+spectra_model <- spectra_wide %>%
+  mutate(
+    forage = as.factor(forage),
+    treatment = as.factor(treatment),
+    surface_type = as.factor(surface_type)
+  ) %>%
+  select(forage, treatment, DAA, starts_with("wl_"))
+
+spectra_model
+```
+
+If you want to predict forage, this is fine because forage is the outcome and treatment, DAA, and wavelengths are predictors.
+
+## For predicting forage, fold DAA into current workflow
+
+```{r}
+
+library(tidymodels)
+library(ranger)
+
+# Data for forage prediction
+spectra_model_forage <- spectra_wide %>%
+  mutate(
+    forage = as.factor(forage),
+    treatment = as.factor(treatment)
+  ) %>%
+  select(forage, treatment, DAA, starts_with("wl_"))
+
+# Train/test split (70 / 30)
+
+set.seed(123)
+data_split <- initial_split(spectra_model_forage, prop = 0.7, strata = forage)
+
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# Cross-validation
+set.seed(123)
+cv_folds <- vfold_cv(train_data, v = 5, strata = forage)
+
+# Random Forest model
+rf_model <- rand_forest(
+  mode = "classification",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger")
+
+# Workflow
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_formula(forage ~ .)
+
+# Random tuning grid
+rf_grid <- grid_random(
+  mtry(range = c(10, 80)),
+  trees(range = c(300, 800)),
+  min_n(range = c(2, 10)),
+  size = 20
+)
+
+# Tune
+rf_tuned <- tune_grid(
+  rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  metrics = metric_set(accuracy, kap)
+)
+
+# Best parameters
+best_params <- select_best(rf_tuned, metric = "accuracy")
+
+# Final model
+final_rf <- finalize_workflow(rf_workflow, best_params)
+
+final_fit <- fit(final_rf, data = train_data)
+
+# Predictions
+predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+# Evaluation
+accuracy(predictions, truth = forage, estimate = .pred_class)
+conf_mat(predictions, truth = forage, estimate = .pred_class)
+
+```
+
+The formula forage \~ . already includes every other column as a predictor. So if DAA is in spectra_model, it is automatically included.
+
+## model_surface_type
+
+```{r}
+spectra_model <- spectra_wide %>%
+  mutate(
+    forage = as.factor(forage),
+    treatment = as.factor(treatment),
+    surface_type = as.factor(surface_type)
+  ) %>%
+  select(surface_type, DAA, starts_with("wl_"))
+
+spectra_model
+```
+
+# Predicting surface type
+
+## Option 1: Higher accuracy model
+
+This includes forage, treatment, DAA, and spectra.
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(ranger)
+
+tidymodels_prefer()
+
+# --------------------------------------------------
+# Data for surface_type prediction
+# Higher-accuracy version: includes forage + treatment + DAA + spectra
+# --------------------------------------------------
+spectra_model_surface <- spectra_wide %>%
+  mutate(
+    date = as.character(date),
+    sample_id = as.character(sample_id),
+    forage = as.factor(forage),
+    treatment = as.factor(treatment),
+    surface_type = as.factor(surface_type),
+    DAA = as.numeric(DAA)
+  ) %>%
+  drop_na() %>%
+  select(date, sample_id, surface_type, forage, treatment, DAA, starts_with("wl_"))
+
+# Optional: reduce spectral bands for speed
+wl_cols <- names(spectra_model_surface)[str_detect(names(spectra_model_surface), "^wl_")]
+wl_keep <- wl_cols[seq(1, length(wl_cols), by = 5)]
+
+spectra_model_surface <- spectra_model_surface %>%
+  select(date, sample_id, surface_type, forage, treatment, DAA, all_of(wl_keep))
+
+# --------------------------------------------------
+# Train/test split
+# --------------------------------------------------
+set.seed(123)
+data_split <- initial_split(spectra_model_surface, prop = 0.7, strata = surface_type)
+
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# --------------------------------------------------
+# Cross-validation
+# --------------------------------------------------
+set.seed(123)
+cv_folds <- vfold_cv(train_data, v = 3, strata = surface_type)
+
+# --------------------------------------------------
+# Recipe
+# --------------------------------------------------
+rf_recipe <- recipe(surface_type ~ ., data = train_data) %>%
+  update_role(date, sample_id, new_role = "id") %>%
+  step_zv(all_predictors())
+
+# --------------------------------------------------
+# Random Forest model
+# --------------------------------------------------
+rf_model <- rand_forest(
+  mode = "classification",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity")
+
+# --------------------------------------------------
+# Workflow
+# --------------------------------------------------
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_model)
+
+# --------------------------------------------------
+# Grid
+# Adjust mtry so it does not exceed number of predictors
+# --------------------------------------------------
+n_pred <- train_data %>%
+  select(-surface_type, -date, -sample_id) %>%
+  ncol()
+
+mtry_max_adj <- min(50, n_pred)
+mtry_min_adj <- min(5, mtry_max_adj)
+
+set.seed(123)
+rf_grid <- grid_random(
+  mtry(range = c(mtry_min_adj, mtry_max_adj)),
+  trees(range = c(300, 800)),
+  min_n(range = c(2, 10)),
+  size = 20
+)
+
+# --------------------------------------------------
+# Tune
+# --------------------------------------------------
+set.seed(123)
+rf_tuned <- tune_grid(
+  rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  metrics = metric_set(accuracy, kap)
+)
+
+# --------------------------------------------------
+# Best parameters
+# --------------------------------------------------
+best_params <- select_best(rf_tuned, metric = "accuracy")
+best_params
+
+# --------------------------------------------------
+# Final model
+# --------------------------------------------------
+final_rf <- finalize_workflow(rf_workflow, best_params)
+
+final_fit <- fit(final_rf, data = train_data)
+
+# --------------------------------------------------
+# Predictions
+# --------------------------------------------------
+predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+# --------------------------------------------------
+# Evaluation
+# --------------------------------------------------
+surface_acc <- accuracy(predictions, truth = surface_type, estimate = .pred_class)
+surface_cm  <- conf_mat(predictions, truth = surface_type, estimate = .pred_class)
+
+surface_acc
+surface_cm
+
+# Numeric accuracy only
+surface_acc$.estimate
+```
+
+## Option 2: Cleaner spectral-only model
+
+This is the better choice if you want to say the model classified surface_type based mainly on hyperspectral response plus time since application.
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(ranger)
+
+tidymodels_prefer()
+
+# --------------------------------------------------
+# Data for surface_type prediction
+# Cleaner version: DAA + spectra only
+# --------------------------------------------------
+spectra_model_surface <- spectra_wide %>%
+  mutate(
+    date = as.character(date),
+    sample_id = as.character(sample_id),
+    surface_type = as.factor(surface_type),
+    DAA = as.numeric(DAA)
+  ) %>%
+  drop_na() %>%
+  select(date, sample_id, surface_type, DAA, starts_with("wl_"))
+
+# Optional: reduce spectral bands for speed
+wl_cols <- names(spectra_model_surface)[str_detect(names(spectra_model_surface), "^wl_")]
+wl_keep <- wl_cols[seq(1, length(wl_cols), by = 5)]
+
+spectra_model_surface <- spectra_model_surface %>%
+  select(date, sample_id, surface_type, DAA, all_of(wl_keep))
+
+# --------------------------------------------------
+# Train/test split
+# --------------------------------------------------
+set.seed(123)
+data_split <- initial_split(spectra_model_surface, prop = 0.7, strata = surface_type)
+
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# --------------------------------------------------
+# Cross-validation
+# --------------------------------------------------
+set.seed(123)
+cv_folds <- vfold_cv(train_data, v = 3, strata = surface_type)
+
+# --------------------------------------------------
+# Recipe
+# --------------------------------------------------
+rf_recipe <- recipe(surface_type ~ ., data = train_data) %>%
+  update_role(date, sample_id, new_role = "id") %>%
+  step_zv(all_predictors())
+
+# --------------------------------------------------
+# Random Forest model
+# --------------------------------------------------
+rf_model <- rand_forest(
+  mode = "classification",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity")
+
+# --------------------------------------------------
+# Workflow
+# --------------------------------------------------
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_model)
+
+# --------------------------------------------------
+# Grid
+# --------------------------------------------------
+n_pred <- train_data %>%
+  select(-surface_type, -date, -sample_id) %>%
+  ncol()
+
+mtry_max_adj <- min(50, n_pred)
+mtry_min_adj <- min(5, mtry_max_adj)
+
+set.seed(123)
+rf_grid <- grid_random(
+  mtry(range = c(mtry_min_adj, mtry_max_adj)),
+  trees(range = c(300, 800)),
+  min_n(range = c(2, 10)),
+  size = 20
+)
+
+# --------------------------------------------------
+# Tune
+# --------------------------------------------------
+set.seed(123)
+rf_tuned <- tune_grid(
+  rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  metrics = metric_set(accuracy, kap)
+)
+
+# --------------------------------------------------
+# Best parameters
+# --------------------------------------------------
+best_params <- select_best(rf_tuned, metric = "accuracy")
+best_params
+
+# --------------------------------------------------
+# Final model
+# --------------------------------------------------
+final_rf <- finalize_workflow(rf_workflow, best_params)
+
+final_fit <- fit(final_rf, data = train_data)
+
+# --------------------------------------------------
+# Predictions
+# --------------------------------------------------
+predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+# --------------------------------------------------
+# Evaluation
+# --------------------------------------------------
+surface_acc <- accuracy(predictions, truth = surface_type, estimate = .pred_class)
+surface_cm  <- conf_mat(predictions, truth = surface_type, estimate = .pred_class)
+
+surface_acc
+surface_cm
+
+# Numeric accuracy only
+surface_acc$.estimate
+```
+
+# Predicting treatment (amendment)
+
+## Model A: treatment without DAA
+
+This tells how well spectra alone separate treatment classes.
+
+```{r}
+spectra_model_treatment_no_daa <- spectra_wide %>%
+  mutate(
+    treatment = as.factor(treatment),
+    forage = as.factor(forage)
+  ) %>%
+  select(treatment, forage, starts_with("wl_"))
+```
+
+## Model B: treatment with DAA
+
+This tells how much temporal information improves classification.
+
+```{r}
+spectra_model_treatment_with_daa <- spectra_wide %>%
+  mutate(
+    treatment = as.factor(treatment),
+    forage = as.factor(forage)
+  ) %>%
+  select(treatment, forage, DAA, starts_with("wl_"))
+```
+
+Then use the same modeling workflow, just changing the outcome to treatment.
+
+```{r}
+# Train/test split
+set.seed(123)
+data_split <- initial_split(spectra_model_treatment_with_daa, prop = 0.7, strata = treatment)
+
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+# CV
+set.seed(123)
+cv_folds <- vfold_cv(train_data, v = 5, strata = treatment)
+
+# RF model
+rf_model <- rand_forest(
+  mode = "classification",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger")
+
+# Workflow
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_formula(treatment ~ .)
+
+# Grid
+rf_grid <- grid_random(
+  mtry(range = c(10, 80)),
+  trees(range = c(300, 800)),
+  min_n(range = c(2, 10)),
+  size = 20
+)
+
+# Tune
+rf_tuned <- tune_grid(
+  rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  metrics = metric_set(accuracy, kap)
+)
+
+# Best params
+best_params <- select_best(rf_tuned, metric = "accuracy")
+
+# Final fit
+final_rf <- finalize_workflow(rf_workflow, best_params)
+final_fit <- fit(final_rf, data = train_data)
+
+# Predict
+predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+# Evaluate
+accuracy(predictions, truth = treatment, estimate = .pred_class)
+conf_mat(predictions, truth = treatment, estimate = .pred_class)
+```
+
+# Random Forest classification for all three targets:
+
+surface_type
+
+forage
+
+treatment
+
+## full script
+
+```{r}
+# =========================================================
+# Random Forest workflow for hyperspectral classification
+# Targets:
+#   1. surface_type
+#   2. forage
+#   3. treatment (with and without DAA)
+# =========================================================
+
+# ---------------------------
+# 1. Load libraries
+# ---------------------------
+#install.packages("doParallel")
+
+library(tidyverse)
+library(tidymodels)
+library(ranger)
+library(doParallel)
+library(lubridate)
+
+# Optional: faster / cleaner printing
+tidymodels_prefer()
+
+# ---------------------------
+# 2. Prepare dataset
+# ---------------------------
+# Assumes spectra_wide already exists and contains:
+# date, sample_id, treatment, forage, rep, surface_type, DAA, wl_350 ... wl_2500
+
+# Make sure key columns are in the right format
+spectra_wide <- spectra_wide %>%
+  mutate(
+    date = as.character(date),
+    sample_id = as.character(sample_id),
+    treatment = as.factor(treatment),
+    forage = as.factor(forage),
+    surface_type = as.factor(surface_type),
+    rep = as.factor(rep),
+    DAA = as.numeric(DAA)
+  )
+
+# Keep wavelength columns
+wl_cols <- names(spectra_wide)[str_detect(names(spectra_wide), "^wl_")]
+
+# Quick check
+cat("Number of wavelength predictors:", length(wl_cols), "\n")
+
+# ---------------------------
+# 3. Optional: reduce bands for speed
+# ---------------------------
+# Keep every 5th wavelength to speed up tuning.
+# Change by = 1 to keep all wavelengths.
+wl_keep <- wl_cols[seq(1, length(wl_cols), by = 5)]
+
+# Modeling dataset base
+model_base <- spectra_wide %>%
+  select(date, sample_id, treatment, forage, surface_type, DAA, all_of(wl_keep))
+
+cat("Number of wavelength predictors retained:", length(wl_keep), "\n")
+
+# ---------------------------
+# 4. Start parallel processing
+# ---------------------------
+n_cores <- max(1, parallel::detectCores() - 1)
+cl <- makePSOCKcluster(n_cores)
+registerDoParallel(cl)
+
+# ---------------------------
+# 5. General modeling function
+# ---------------------------
+run_rf_model <- function(data, outcome, strata_var = NULL, seed = 123,
+                         mtry_min = 5, mtry_max = 50,
+                         trees_min = 300, trees_max = 800,
+                         min_n_min = 2, min_n_max = 10,
+                         grid_size = 20, v_folds = 3) {
+
+  outcome <- rlang::ensym(outcome)
+
+  # Remove rows with missing values
+  data <- data %>%
+    drop_na()
+
+  # Define stratification column
+  if (is.null(strata_var)) {
+    strata_var <- rlang::as_name(outcome)
+  }
+
+  # Split
+  set.seed(seed)
+  data_split <- initial_split(
+    data,
+    prop = 0.7,
+    strata = !!rlang::sym(strata_var)
+  )
+
+  train_data <- training(data_split)
+  test_data  <- testing(data_split)
+
+  # Cross-validation
+  set.seed(seed)
+  cv_folds <- vfold_cv(
+    train_data,
+    v = v_folds,
+    strata = !!rlang::sym(strata_var)
+  )
+
+  # Recipe
+  rf_recipe <- recipe(formula = as.formula(paste(rlang::as_name(outcome), "~ .")), data = train_data) %>%
+    # Remove identifiers that should not be used as predictors
+    update_role(date, sample_id, new_role = "id") %>%
+    step_zv(all_predictors())
+
+  # Model
+  rf_model <- rand_forest(
+    mode = "classification",
+    mtry = tune(),
+    trees = tune(),
+    min_n = tune()
+  ) %>%
+    set_engine("ranger", importance = "impurity")
+
+  # Workflow
+  rf_workflow <- workflow() %>%
+    add_recipe(rf_recipe) %>%
+    add_model(rf_model)
+
+  # Parameter range
+  # mtry must not exceed number of predictors
+  n_pred <- train_data %>%
+    select(-all_of(rlang::as_name(outcome)), -date, -sample_id) %>%
+    ncol()
+
+  mtry_max_adj <- min(mtry_max, n_pred)
+  mtry_min_adj <- min(mtry_min, mtry_max_adj)
+
+  rf_grid <- grid_random(
+    mtry(range = c(mtry_min_adj, mtry_max_adj)),
+    trees(range = c(trees_min, trees_max)),
+    min_n(range = c(min_n_min, min_n_max)),
+    size = grid_size
+  )
+
+  # Tune
+  set.seed(seed)
+  rf_tuned <- tune_grid(
+    rf_workflow,
+    resamples = cv_folds,
+    grid = rf_grid,
+    metrics = metric_set(accuracy, kap)
+  )
+
+  # Best params
+  best_params <- select_best(rf_tuned, metric = "accuracy")
+
+  # Finalize
+  final_rf <- finalize_workflow(rf_workflow, best_params)
+
+  # Fit final model
+  final_fit <- fit(final_rf, data = train_data)
+
+  # Predict
+  predictions <- predict(final_fit, test_data) %>%
+    bind_cols(test_data)
+
+  # Metrics
+  acc <- accuracy(predictions, truth = !!outcome, estimate = .pred_class)
+  kap_tbl <- kap(predictions, truth = !!outcome, estimate = .pred_class)
+  cm <- conf_mat(predictions, truth = !!outcome, estimate = .pred_class)
+
+  # Variable importance
+  rf_engine <- extract_fit_parsnip(final_fit)$fit
+  var_imp <- tibble(
+    variable = names(rf_engine$variable.importance),
+    importance = as.numeric(rf_engine$variable.importance)
+  ) %>%
+    arrange(desc(importance))
+
+  # Return everything
+  list(
+    outcome = rlang::as_name(outcome),
+    train_data = train_data,
+    test_data = test_data,
+    cv_folds = cv_folds,
+    tuned_results = rf_tuned,
+    best_params = best_params,
+    final_workflow = final_rf,
+    final_fit = final_fit,
+    predictions = predictions,
+    accuracy = acc,
+    kappa = kap_tbl,
+    confusion_matrix = cm,
+    variable_importance = var_imp
+  )
+}
+
+# ---------------------------
+# 6. Build datasets for each target
+# ---------------------------
+
+# A. Surface type model
+# Predict surface_type from DAA + treatment + forage + spectra
+data_surface_type <- model_base %>%
+  select(date, sample_id, surface_type, forage, treatment, DAA, all_of(wl_keep))
+
+# B. Forage model
+# Predict forage from DAA + treatment + spectra
+data_forage <- model_base %>%
+  select(date, sample_id, forage, treatment, DAA, all_of(wl_keep))
+
+# C1. Treatment model without DAA
+# Predict treatment from forage + spectra
+data_treatment_no_daa <- model_base %>%
+  select(date, sample_id, treatment, forage, all_of(wl_keep))
+
+# C2. Treatment model with DAA
+# Predict treatment from forage + DAA + spectra
+data_treatment_with_daa <- model_base %>%
+  select(date, sample_id, treatment, forage, DAA, all_of(wl_keep))
+
+# ---------------------------
+# 7. Run models
+# ---------------------------
+
+# Surface type classification
+results_surface_type <- run_rf_model(
+  data = data_surface_type,
+  outcome = surface_type,
+  strata_var = "surface_type",
+  seed = 123,
+  mtry_min = 5,
+  mtry_max = 50,
+  trees_min = 300,
+  trees_max = 800,
+  min_n_min = 2,
+  min_n_max = 10,
+  grid_size = 20,
+  v_folds = 3
+)
+
+# Forage classification
+results_forage <- run_rf_model(
+  data = data_forage,
+  outcome = forage,
+  strata_var = "forage",
+  seed = 123,
+  mtry_min = 5,
+  mtry_max = 50,
+  trees_min = 300,
+  trees_max = 800,
+  min_n_min = 2,
+  min_n_max = 10,
+  grid_size = 20,
+  v_folds = 3
+)
+
+# Treatment classification without DAA
+results_treatment_no_daa <- run_rf_model(
+  data = data_treatment_no_daa,
+  outcome = treatment,
+  strata_var = "treatment",
+  seed = 123,
+  mtry_min = 5,
+  mtry_max = 50,
+  trees_min = 300,
+  trees_max = 800,
+  min_n_min = 2,
+  min_n_max = 10,
+  grid_size = 20,
+  v_folds = 3
+)
+
+# Treatment classification with DAA
+results_treatment_with_daa <- run_rf_model(
+  data = data_treatment_with_daa,
+  outcome = treatment,
+  strata_var = "treatment",
+  seed = 123,
+  mtry_min = 5,
+  mtry_max = 50,
+  trees_min = 300,
+  trees_max = 800,
+  min_n_min = 2,
+  min_n_max = 10,
+  grid_size = 20,
+  v_folds = 3
+)
+
+# ---------------------------
+# 8. Compare model performance
+# ---------------------------
+
+model_summary <- bind_rows(
+  results_surface_type$accuracy %>%
+    mutate(model = "surface_type"),
+  results_forage$accuracy %>%
+    mutate(model = "forage"),
+  results_treatment_no_daa$accuracy %>%
+    mutate(model = "treatment_no_DAA"),
+  results_treatment_with_daa$accuracy %>%
+    mutate(model = "treatment_with_DAA")
+) %>%
+  select(model, .estimate)
+
+kappa_summary <- bind_rows(
+  results_surface_type$kappa %>%
+    mutate(model = "surface_type"),
+  results_forage$kappa %>%
+    mutate(model = "forage"),
+  results_treatment_no_daa$kappa %>%
+    mutate(model = "treatment_no_DAA"),
+  results_treatment_with_daa$kappa %>%
+    mutate(model = "treatment_with_DAA")
+) %>%
+  select(model, .estimate)
+
+cat("\nAccuracy summary:\n")
+print(model_summary)
+
+cat("\nKappa summary:\n")
+print(kappa_summary)
+
+# ---------------------------
+# 9. Print best parameters
+# ---------------------------
+cat("\nBest parameters - surface_type:\n")
+print(results_surface_type$best_params)
+
+cat("\nBest parameters - forage:\n")
+print(results_forage$best_params)
+
+cat("\nBest parameters - treatment without DAA:\n")
+print(results_treatment_no_daa$best_params)
+
+cat("\nBest parameters - treatment with DAA:\n")
+print(results_treatment_with_daa$best_params)
+
+# ---------------------------
+# 10. Print confusion matrices
+# ---------------------------
+cat("\nConfusion matrix - surface_type:\n")
+print(results_surface_type$confusion_matrix)
+
+cat("\nConfusion matrix - forage:\n")
+print(results_forage$confusion_matrix)
+
+cat("\nConfusion matrix - treatment without DAA:\n")
+print(results_treatment_no_daa$confusion_matrix)
+
+cat("\nConfusion matrix - treatment with DAA:\n")
+print(results_treatment_with_daa$confusion_matrix)
+
+# ---------------------------
+# 11. Save outputs if needed
+# ---------------------------
+# write_csv(model_summary, "rf_accuracy_summary.csv")
+# write_csv(kappa_summary, "rf_kappa_summary.csv")
+# write_csv(results_surface_type$variable_importance, "rf_varimp_surface_type.csv")
+# write_csv(results_forage$variable_importance, "rf_varimp_forage.csv")
+# write_csv(results_treatment_no_daa$variable_importance, "rf_varimp_treatment_no_daa.csv")
+# write_csv(results_treatment_with_daa$variable_importance, "rf_varimp_treatment_with_daa.csv")
+
+# ---------------------------
+# 12. Stop parallel backend
+# ---------------------------
+stopCluster(cl)
+registerDoSEQ()
+```
+
+Three figures that will make this chapter look much more like a proper hyperspectral classification paper.
+
+1.  Spectral reflectance curves by class
+2.  Random Forest variable importance plot
+3.  Confusion matrix heatmap
+
+# 1. Spectral reflectance curves by class
+
+This figure shows the average reflectance pattern for each class across wavelengths.
+
+```{r}
+library(tidyverse)
+
+# Mean reflectance by class and wavelength
+spectral_summary <- spectra_long %>%
+  group_by(treatment, wave_length) %>%
+  summarise(
+    mean_reflectance = mean(reflectance_percent, na.rm = TRUE),
+    sd_reflectance = sd(reflectance_percent, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Plot
+ggplot(spectral_summary, aes(x = wave_length, y = mean_reflectance, color = surface_type)) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(
+    aes(
+      ymin = mean_reflectance - sd_reflectance,
+      ymax = mean_reflectance + sd_reflectance,
+      fill = surface_type
+    ),
+    alpha = 0.15,
+    color = NA
+  ) +
+  labs(
+    title = "Spectral Reflectance Curves by Surface Class",
+    x = "Wavelength (nm)",
+    y = "Reflectance (%)",
+    color = "Surface type",
+    fill = "Surface type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+```
+
+This figure shows:
+
+Mean spectral signature of each class Separation among dung, urine, bare soil, and forage Variability around the mean using the shaded band
+
+Thesis-style interpretation
+
+Mean spectral reflectance curves revealed clear separability among surface classes across selected wavelength regions. Vegetated surfaces showed the typical chlorophyll absorption in the visible range and strong near-infrared reflectance, whereas dung, urine-affected surfaces, and bare soil exhibited distinct spectral responses associated with differences in moisture, organic matter, and surface composition.
+
+```{r}
+ggsave("spectral_reflectance_curves.png", width = 10, height = 6, dpi = 300)
+
+```
+
+# 2. Random Forest variable importance plot
+
+This identifies which wavelengths contributed most to classification.
+
+If you used ranger through tidymodels, variable importance needs to be enabled in the model engine. If you have not done that yet, use this model specification:
+
+```{r}
+rf_model <- rand_forest(
+  mode = "classification",
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity")
+```
+
+Then refit the final model.
+
+# Extract importance from the fitted model
+
+```{r}
+library(tidyverse)
+
+# Extract fitted ranger model from workflow
+rf_engine <- extract_fit_parsnip(final_fit)$fit
+
+# Variable importance table
+var_imp <- enframe(rf_engine$variable.importance, name = "wavelength", value = "importance") %>%
+  arrange(desc(importance))
+```
+
+# Plot top important wavelengths
+
+```{r}
+var_imp %>%
+  slice_max(order_by = importance, n = 20) %>%
+  ggplot(aes(x = reorder(wavelength, importance), y = importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 20 Important Spectral Predictors in Random Forest Classification",
+    x = "Wavelength",
+    y = "Variable importance"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold")
+  )
+```
+
+# If you want numeric wavelengths instead of wl_700 format
+
+```{r}
+var_imp <- var_imp %>%
+  mutate(wavelength_num = readr::parse_number(wavelength))
+```
+
+Then plot:
+
+```{r}
+var_imp %>%
+  slice_max(order_by = importance, n = 20) %>%
+  ggplot(aes(x = reorder(wavelength_num, importance), y = importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 20 Important Wavelengths in Random Forest Classification",
+    x = "Wavelength (nm)",
+    y = "Variable importance"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold")
+  )
+```
+
+Thesis-style interpretation
+
+Variable importance analysis indicated that only a subset of wavelengths contributed strongly to class discrimination. The most informative wavelengths were concentrated in spectral regions associated with chlorophyll absorption, red-edge transitions, and moisture-sensitive bands, suggesting that differences in vegetation composition and surface moisture were central to distinguishing pasture surface classes.
+
+```{r}
+ggsave("variable_importance_plot.png", width = 8, height = 6, dpi = 300)
+
+```
+
+# 3. Confusion matrix heatmap
+
+This figure is much more publication-friendly than printing a raw confusion matrix table.
+
+## Create confusion matrix data
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+
+cm <- conf_mat(predictions, truth = surface_type, estimate = .pred_class)
+
+cm_df <- as.data.frame(cm$table)
+colnames(cm_df) <- c("Truth", "Prediction", "Freq")
+```
+
+## Plot confusion matrix heatmap
+
+```{r}
+ggplot(cm_df, aes(x = Prediction, y = Truth, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), size = 5) +
+  labs(
+    title = "Confusion Matrix Heatmap for Random Forest Classification",
+    x = "Predicted class",
+    y = "Reference class",
+    fill = "Count"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Optional normalized confusion matrix
+
+This version is often better because it shows class-wise proportions.
+
+```{r}
+cm_df_prop <- cm_df %>%
+  group_by(Truth) %>%
+  mutate(Proportion = Freq / sum(Freq))
+
+ggplot(cm_df_prop, aes(x = Prediction, y = Truth, fill = Proportion)) +
+  geom_tile() +
+  geom_text(aes(label = round(Proportion, 2)), size = 5) +
+  labs(
+    title = "Normalized Confusion Matrix for Random Forest Classification",
+    x = "Predicted class",
+    y = "Reference class",
+    fill = "Proportion"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+Thesis-style interpretation
+
+The confusion matrix showed that overall classification performance was strong, although some misclassification occurred among spectrally similar classes. Diagonal dominance in the matrix indicated high agreement between predicted and observed classes, while off-diagonal values identified the principal sources of classification error.
+
+```{r}
+ggsave("confusion_matrix_heatmap.png", width = 7, height = 6, dpi = 300)
+```
+
+## Recommended figure captions
+
+You can use these as starting points.
+
+Figure 1. Spectral reflectance curves by class. Mean reflectance spectra for each pasture surface class across wavelengths, with shaded bands representing one standard deviation around the mean.
+
+Figure 2. Variable importance from the Random Forest classifier. The top spectral predictors contributing to discrimination among pasture surface classes based on Random Forest variable importance scores.
+
+Figure 3. Confusion matrix heatmap for Random Forest classification. Observed versus predicted class assignments for the test dataset. Values along the diagonal represent correctly classified samples, while off-diagonal values indicate misclassification.

@@ -1,0 +1,1124 @@
+---
+title: "Spectral signature"
+format: html
+editor: visual
+---
+
+---
+title: "Spectral signature_august_26_2025"
+output: html_document
+author: "Polycarpe Mizero" 
+date: "August 16 2025"
+format:
+  html:
+    code-fold: false
+    embed-resources: true
+    toc: true
+    number-sections: false
+    theme: cerulean
+---
+
+# Set up
+
+```{r setup, message=FALSE, warning=FALSE}
+#install.packages("hms")
+#install.packages("fluxfinder")
+#install.packages("goflux")
+#install.packages("remotes")
+#remotes::install_github("COMPASS-DOE/fluxfinder", build_vignettes = TRUE)
+#install.packages("fuzzyjoin")
+#install.packages("tidyverse")
+
+library(readxl) # to read excel files
+library(janitor) # to clean data
+library(dplyr) # wrangling
+library(tidyr) # wrangling
+library(readr) # to export csv
+library(hms)
+library(ggplot2)
+library(fuzzyjoin)
+library(lme4)
+library(car)
+library(patchwork)
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(emmeans)
+library(multcompView)
+library(fs)
+library(purrr)
+library(fs)
+library(stringr)
+library(broom)
+library(tidymodels)
+
+
+```
+
+## The general plan
+
+oad all 60 spectral .csv (or .txt) files plot individual spectral signatures combine them for overall plots compute NDVI summarize reflectance ranges compare NDVI by treatment with ANOVA optionally run regressions of NDVI on treatments visualize with ggplot as in your attached figure
+
+Plot
+
+Individual reflectance curves.
+
+Then overlay all 60.
+
+```{r data cleaning}
+
+# Load required package
+library(readr)
+
+# Define the path to your .sed file
+file_path <- "../data/20250826/SR-3500_SN20880T4_00000.sed"  
+
+# Read the file, skipping the first 26 lines
+gh <- read_tsv(
+  file = file_path,
+  skip = 27,
+  col_names = c("wavelength", "radiance_ref", "radiance_target", "reflectance_percent")
+)
+
+# View the first few rows
+head(gh)
+
+
+```
+
+# Data wrangling
+
+```{r}
+gh_1 <- clean_names(gh)
+
+head(gh_1)
+```
+
+```{r select necessary columns}
+gh_w <- gh_1 %>%
+  dplyr::select(wave_length = wavelength, reflectance_percent)
+
+head(gh_w)
+```
+
+```{r}
+summary(gh_w)
+```
+
+```{r}
+glimpse(gh_w)
+```
+
+```{r single_plot}
+ggplot(data = gh_w,
+       aes(x = wave_length,
+           y = reflectance_percent)) + 
+  geom_line(color="darkgreen") +
+  labs(title = "Reflectance variation",
+       x = "Wave length (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+
+```
+
+## Load all 60 files into one dataframe
+
+```{r message=FALSE, warning=FALSE}
+
+
+# Set folder path
+folder_path <- "../data/20250826/"  
+
+# Extract date from folder name and format it
+date_value <- basename(folder_path) %>%
+  str_remove("/") %>%
+  as.Date(format = "%Y%m%d") %>%
+  format("%Y_%m_%d")
+
+# List all .sed files
+sed_files <- dir_ls(folder_path, glob = "*.sed")
+
+# Define function to read and process one .sed file
+read_sed_file <- function(file_path) {
+  # Extract file code (last two digits before .sed)
+  file_code <- str_extract(basename(file_path), "(\\d{2})(?=\\.sed$)")
+
+  # Read the file and add file_code column
+  read_tsv(
+    file = file_path,
+    skip = 27,
+    col_names = c("wave_length", "radiance_ref", "radiance_target", "reflectance_percent"),
+    show_col_types = FALSE
+  ) %>%
+    mutate(file_code = as.numeric(file_code),
+           date = date_value
+           )
+}
+
+# Apply the function to all files and combine
+all_spectra <- map_dfr(sed_files, read_sed_file)
+
+# View the combined data
+head(all_spectra)
+
+#all_spectra %>%
+# filter(file_code == 60)
+
+
+```
+
+```{r}
+
+
+# Read Excel mapping
+mapping <- read_excel("../data/file names/august_26_2025.xlsx") %>%
+  rename(plot_number = `Plot number`,
+         rep = Rep,
+         treatment = `Treatment name`,
+         file_code = `File name`) %>%
+  mutate(treatment = str_replace_all(treatment, "\\+", "_"))
+
+
+# Join mapping with files
+matched_files <- all_spectra %>%
+  inner_join(mapping, by = "file_code") %>%
+  mutate(sample_id = paste0(treatment, "_", plot_number))
+
+
+head(matched_files)
+
+
+#matched_files %>%
+ # filter(file_code == 60)
+```
+
+## Extract treatment info from filenames
+
+```{r}
+#spliting the treatment column into forage and treatment
+spectra_data <- matched_files %>%
+  separate(treatment, into = c("forage", "treatment"), sep = "_")%>%
+  dplyr::select(date, sample_id, plot_number, wave_length, reflectance_percent, rep, forage, treatment)
+
+head(spectra_data)
+```
+
+## abbreviations to full names
+
+```{r}
+spectra_data <- spectra_data %>%
+  mutate(
+    forage = case_when(
+      forage == "be" ~ "bermudagrass",
+      forage == "al" ~ "alfalfa",
+      forage == "cra" ~ "crabgrass",
+      forage == "un" ~ "unplanted",
+      TRUE ~ forage   # keep original if not matched
+    ),
+    treatment = case_when(
+      treatment == "U" ~ "urine",
+      treatment == "D" ~ "dung",
+      treatment == "cont" ~ "control",
+      TRUE ~ treatment   # keep original if not matched
+    )
+  )
+
+spectra_data
+```
+
+```{r}
+summary(spectra_data$reflectance_percent)
+```
+
+```{r}
+glimpse(spectra_data)
+```
+
+```{r}
+write.csv(spectra_data, "../output/spectral_data_august_26.csv")
+```
+
+## Removing treatments with bias data
+
+```{r}
+
+# Vector of sample_ids to remove
+#remove_ids <- c("cra_cont_102", "cra_D_109", "cra_U_111", "cra_D_209", 
+ #              "al_D_211", "al_D_312", "cra_D_402", "al_D_412", 
+  #              "cra_U_501", "al_D_510", "al_U_511")
+
+# Remove those rows
+#spectra_data <- spectra_data %>%
+ # filter(!sample_id %in% remove_ids)
+
+# Check dimensions before/after
+#dim(spectra_data)
+#dim(spectra_data)
+
+# Preview cleaned data
+#head(spectra_data)
+
+```
+
+## Plot individual spectral signatures
+
+```{r}
+spectra_data %>% 
+  filter(sample_id == "be_U_112") %>%
+  ggplot(aes(x = wave_length, y = reflectance_percent)) +
+  geom_line(color="darkgreen") +
+  labs(title = "Spectral signature for un_u_101") +
+  theme_minimal()
+
+```
+
+## removong water bands that are problematic
+
+```{r}
+spectra_data %>% 
+  filter(
+    sample_id == "be_U_112",
+    wave_length <= 1300
+  ) %>%
+  ggplot(aes(x = wave_length, y = reflectance_percent)) +
+  geom_line(color = "darkgreen") +
+  labs(title = "Spectral signature for un_u_101") +
+  theme_minimal()
+
+```
+
+## plot for small multiples
+
+```{r}
+spectra_data %>%
+  ggplot(aes(x = wave_length, y = reflectance_percent, color = forage)) +
+  geom_line() +
+  facet_wrap(~sample_id) +
+  theme_minimal() +
+  labs(title = "Spectral variation for all treatments",
+       x = "Wave length (nm)",
+       y = "Reflectance (%))",
+       fill = "Forage species")
+
+```
+
+## combined plot of all samples
+
+```{r}
+ggplot(spectra_data, aes(x = wave_length, y = reflectance_percent, group = sample_id, color = treatment)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  labs(title = "Spectral signatures for all samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+
+```
+
+##removing water bands that are problematic
+
+```{r}
+spectra_data %>%
+ filter(wave_length <= 1450) %>% 
+ggplot(aes(x = wave_length, y = reflectance_percent, group = sample_id, color = treatment)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  labs(title = "Spectral signatures for all samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal() 
+  
+```
+
+Spectral curves show the classic vegetation signature: low reflectance in the red (around 670 nm) due to chlorophyll absorption, sharp rise at the red edge (\~700 nm), and plateau in NIR (800-1100 nm).
+
+```{r}
+ggsave("../output/all_spectral_august_26.png",
+       width = 6,
+       height = 4
+       )
+```
+
+## combined plot by forage species
+
+```{r}
+ggplot(spectra_data, aes(x = wave_length, y = reflectance_percent, group = sample_id, color = treatment)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  facet_wrap(~forage) +
+  labs(title = "Spectral signatures for all samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+```
+
+```{r}
+spectra_data %>%
+  filter(wave_length <= 1450) %>% 
+ggplot(aes(x = wave_length, y = reflectance_percent, group = sample_id, color = treatment)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  facet_wrap(~forage) +
+  labs(title = "Spectral signatures for all forage samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+```
+
+```{r}
+ggsave("../output/spectral_by_forage_august_26.png",
+       width = 6,
+       height = 4
+       )
+```
+
+## combined plot by treatments applied
+
+```{r}
+ggplot(spectra_data, aes(x = wave_length, y = reflectance_percent, group = sample_id, color = forage)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  facet_wrap(~treatment) +
+  labs(title = "Spectral signatures for all treatment samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+```
+
+```{r}
+spectra_data %>%
+  filter(wave_length <= 1450) %>% 
+ggplot(aes(x = wave_length, y = reflectance_percent, group = sample_id, color = forage)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  facet_wrap(~treatment) +
+  labs(title = "Spectral signatures for all treatment samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)",
+       fill = "Forage species") +
+  theme_minimal()
+```
+
+```{r}
+ggsave("../output/spectral_by_treatment_august_26.png",
+       width = 6,
+       height = 4
+       )
+```
+
+## plotting the SD within and across treatments
+
+```{r}
+
+
+# 1. Calculate within-treatment standard deviation at each wavelength
+within_sd <- spectra_data %>%
+  filter(wave_length <= 1450)%>%
+  group_by(treatment, wave_length) %>%
+  summarise(
+    mean_reflectance = mean(reflectance_percent, na.rm = TRUE),
+    sd_reflectance = sd(reflectance_percent, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Calculate across-treatment separation (range of means)
+across_sep <- within_sd %>%
+  group_by(wave_length) %>%
+  summarise(
+    range_means = max(mean_reflectance, na.rm = TRUE) -
+                  min(mean_reflectance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 3. Plot within-treatment variability (example: for each treatment)
+ggplot(within_sd, aes(x = wave_length, y = sd_reflectance, color = treatment)) +
+  geom_line(size = 1) +
+  labs(
+    title = "Within-treatment variability of spectral reflectance",
+    x = "Wavelength (nm)", y = "Standard Deviation"
+  ) +
+  theme_minimal()
+
+# 4. Plot across-treatment separation
+ggplot(across_sep, aes(x = wave_length, y = range_means)) +
+  geom_line(color = "black", size = 1) +
+  labs(
+    title = "Across-treatment spectral separation",
+    x = "Wavelength (nm)", y = "Range of mean reflectance across treatments"
+  ) +
+  theme_minimal()
+
+# 5. Optional: Combine into one figure (using facets)
+combined <- within_sd %>%
+  group_by(wave_length) %>%
+  summarise(
+    across_range = max(mean_reflectance, na.rm = TRUE) -
+                   min(mean_reflectance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  left_join(within_sd, by = "wave_length")
+
+ggplot(combined, aes(x = wave_length)) +
+  geom_line(aes(y = sd_reflectance, color = treatment), alpha = 0.7) +
+  geom_line(aes(y = across_range), color = "black", size = 1.2, linetype = "dashed") +
+  labs(
+    title = "Within- and Across-treatment Spectral Variation",
+    x = "Wavelength (nm)", y = "Reflectance variability"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+ggsave("../output/wavelength_separation_august_26.png",
+       width = 6,
+       height = 4
+       )
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 1. Compute across-treatment separation again
+across_sep <- spectra_data %>%
+  filter(wave_length <= 1450)%>%
+  group_by(treatment, wave_length) %>%
+  summarise(mean_reflectance = mean(reflectance_percent, na.rm = TRUE),
+            .groups = "drop") %>%
+  group_by(wave_length) %>%
+  summarise(range_means = max(mean_reflectance, na.rm = TRUE) -
+                           min(mean_reflectance, na.rm = TRUE),
+            .groups = "drop")
+
+# 2. Define threshold (e.g., top 5% of separations)
+threshold <- quantile(across_sep$range_means, 0.95, na.rm = TRUE)
+
+peak_regions <- across_sep %>%
+  filter(range_means >= threshold) %>%
+  arrange(wave_length)
+
+# 3. Collapse consecutive wavelengths into ranges
+peak_ranges <- peak_regions %>%
+  mutate(group = cumsum(c(1, diff(wave_length) > 5))) %>%   # 5 nm gap = new range
+  group_by(group) %>%
+  summarise(start_wl = min(wave_length),
+            end_wl   = max(wave_length),
+            max_sep  = max(range_means),
+            .groups = "drop")
+
+print(peak_ranges)
+
+# 4. Plot with shaded bands for ranges
+ggplot(across_sep, aes(x = wave_length, y = range_means)) +
+  geom_line(color = "black", size = 1) +
+  geom_rect(data = peak_ranges,
+            aes(xmin = start_wl, xmax = end_wl,
+                ymin = 0, ymax = max_sep),
+            fill = "red", alpha = 0.2, inherit.aes = FALSE) +
+  labs(title = "Across-treatment spectral separation (highlighting key wavelength ranges)",
+       x = "Wavelength (nm)", y = "Range of mean reflectance") +
+  theme_minimal()
+
+```
+
+## Range of wavelengths that best differentiate surface type
+
+We’ll do this by ranking wavelengths by their across-treatment separation (range of means) and pulling the top values.
+
+```{r}
+library(dplyr)
+
+# 1. Compute mean reflectance per treatment per wavelength
+within_sd <- spectra_data %>%
+  filter(wave_length <= 1450)%>%
+  group_by(treatment, wave_length) %>%
+  summarise(
+    mean_reflectance = mean(reflectance_percent, na.rm = TRUE),
+    sd_reflectance   = sd(reflectance_percent, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Compute across-treatment separation (range of mean reflectance per wavelength)
+across_sep <- within_sd %>%
+  group_by(wave_length) %>%
+  summarise(
+    range_means = max(mean_reflectance, na.rm = TRUE) -
+                  min(mean_reflectance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 3. Identify top 10 wavelengths with largest separation
+top_wavelengths <- across_sep %>%
+  arrange(desc(range_means)) %>%
+  slice_head(n = 10)
+
+# Print results
+print(top_wavelengths)
+
+# 4. Optionally: extract contiguous ranges (e.g., bands around peaks)
+# Find where range_means is in the top 5% of all separations
+threshold <- quantile(across_sep$range_means, 0.95, na.rm = TRUE)
+
+best_ranges <- across_sep %>%
+  filter(range_means >= threshold)
+
+print(best_ranges)
+
+```
+
+## Calculating vegetation indices
+
+NDVI: Normalized Difference Vegetation Index NDRE: Normalized Difference Red Edge EVI: Enhanced Vegetation Index \# measures vegetation "greenness" and vigor SAVI: Soil Adjusted Vegetation Index \# minimize the influence of soil brightness when assessing plant health.
+
+We can make multiple vegetation indices with different combinations of different bands.
+
+# Extract all wavelengths (Band names) under each Band
+
+NDVI = (NIR_Band - Red_Band) / (NIR_Band + Red_Band)
+
+Wavelength starts from 350 nm to 2500 nm
+
+Blue: wave_length between 450–495 nm
+
+Red: wave_length between 630–690 nm: 61 Bands
+
+Red_edge: wave_length between 680-750 nm:
+
+NIR: wave_length between 700–1000 nm: 301 bands
+
+For example with that, we can calculate a total of 60 x 300 = **18000** different NDVIs!
+
+Lets extract the Bands name which falls under Red and NIR Bands for this sensor, and calculate NDVI.
+
+## Filter for red and NIR bands
+
+```{r}
+# Filter the necessary bands
+spectra_blue <- spectra_data %>%
+  filter(wave_length >= 450, wave_length <= 495) %>%
+  rename(blue_wl = wave_length, blue_val = reflectance_percent)
+
+spectra_blue
+
+spectra_red <- spectra_data %>%
+  filter(wave_length >= 630, wave_length <= 690) %>%
+  rename(red_wl = wave_length, red_val = reflectance_percent)
+
+spectra_red
+
+spectra_redge <- spectra_data %>%
+  filter(wave_length >= 680, wave_length <= 750) %>%
+  rename(redge_wl = wave_length, redge_val = reflectance_percent)
+
+spectra_redge
+
+spectra_nir <- spectra_data %>%
+  filter(wave_length >= 700, wave_length <= 1000) %>%
+  rename(nir_wl = wave_length, nir_val = reflectance_percent)
+
+spectra_nir
+```
+
+## all bands combination and calculate all vegetation indices
+
+Pivot the dataset to a long format so each wavelength is a column. Generate all possible red–NIR wavelength pairings
+
+Calculate vegatation indices for each pair using:
+
+NDVI = (NIR - Red) / (NIR + Red) NDRE = (NIR – RedEdge) / (NIR + RedEdge) EVI = 2.5 × (NIR – Red) / (NIR + 6×Red – 7.5×Blue + 1)
+
+```{r}
+
+library(dplyr)
+
+# Collapse each band range to mean reflectance per sample_id
+spectra_blue <- spectra_data %>%
+  filter(wave_length >= 450, wave_length <= 495) %>%
+  group_by(sample_id, forage, treatment) %>%
+  summarise(blue_val = mean(reflectance_percent, na.rm = TRUE),
+            blue_wl = mean(wave_length), .groups = "drop")
+
+spectra_red <- spectra_data %>%
+  filter(wave_length >= 630, wave_length <= 690) %>%
+  group_by(sample_id, forage, treatment) %>%
+  summarise(red_val = mean(reflectance_percent, na.rm = TRUE),
+            red_wl = mean(wave_length), .groups = "drop")
+
+spectra_redge <- spectra_data %>%
+  filter(wave_length >= 680, wave_length <= 750) %>%
+  group_by(sample_id, forage, treatment) %>%
+  summarise(redge_val = mean(reflectance_percent, na.rm = TRUE),
+            redge_wl = mean(wave_length), .groups = "drop")
+
+spectra_nir <- spectra_data %>%
+  filter(wave_length >= 700, wave_length <= 1000) %>%
+  group_by(sample_id, forage, treatment) %>%
+  summarise(nir_val = mean(reflectance_percent, na.rm = TRUE),
+            nir_wl = mean(wave_length), .groups = "drop")
+
+# ✅ Now join safely (1 row per sample_id per band)
+spectra_all <- spectra_red %>%
+  inner_join(spectra_nir, by = c("sample_id", "forage", "treatment")) %>%
+  inner_join(spectra_redge, by = c("sample_id", "forage", "treatment")) %>%
+  inner_join(spectra_blue, by = c("sample_id", "forage", "treatment")) %>%
+  mutate(
+    # NDVI
+    ndvi = (nir_val - red_val) / (nir_val + red_val),
+    # NDRE
+    ndre = (nir_val - redge_val) / (nir_val + redge_val),
+    # EVI
+    evi = 2.5 * (nir_val - red_val) / (nir_val + 6 * red_val - 7.5 * blue_val + 1)
+  ) %>%
+  select(sample_id, forage, treatment,
+         red_wl, nir_wl, redge_wl, blue_wl,
+         ndvi, ndre, evi)
+
+# Preview results
+head(spectra_all)
+
+```
+
+I wanted every red × NIR within the same sample. The results give a long dataframe with sample-wise full band combinations. The results shows all NDVI combinations for each sample. Each row tells which red and NIR bands were used.
+
+```{r}
+
+spectra_all_clean <- spectra_data %>%
+  mutate(surface_type = paste(forage, treatment, sep = "_"))
+
+# View the updated data
+head(spectra_all_clean)
+
+```
+
+```{r}
+write.csv(spectra_all_clean, "../data/all_dates/august_26.csv", row.names = TRUE)
+```
+
+```{r}
+spectra_data_cleann <- spectra_all_clean %>%
+  mutate(surface_type = paste(forage, treatment, sep = "_"))
+
+# View the updated data
+head(spectra_data_cleann)
+```
+
+##RF classification model
+
+Load and preprocess the data. Split into training (70%) and testing (30%). Build a random forest classification model with tuning on mtry, trees, and min_n. Fit the tuned model. Evaluate performance using confusion matrix and accuracy.
+
+## Random forest should be trained on a wide dataset (one row per sample, multiple predictors = reflectance/indices), not a long dataset (many rows per sample).
+
+## Pivoting wider the dataset
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Convert long -> wide format
+spectra_wide <- spectra_data_cleann %>%
+  select(sample_id, treatment, surface_type, wave_length, reflectance_percent) %>%
+  pivot_wider(
+    names_from = wave_length,
+    values_from = reflectance_percent,
+    names_prefix = "wl_"
+  )%>%
+  mutate(treatment = as.factor(treatment))
+
+# Remove sample_id if not needed, keep surface_type as label
+#spectra_wide <- spectra_wide %>%
+  #select(-sample_id) 
+
+spectra_wide
+```
+
+Each row = one sample, each column = one reflectance feature. This massively reduces training time.
+
+## Ensure consistent factor levels before split
+
+```{r}
+# Make sure treatment is factor and has all levels
+spectra_wide <- spectra_wide %>%
+  mutate(treatment = factor(treatment)) %>%
+  mutate(surface_type = factor(surface_type))%>%
+  droplevels()
+
+spectra_wide
+```
+
+## amendment treatment ()
+
+```{r}
+spectra_wide <- spectra_wide %>%
+  select(-sample_id) %>%
+  select(-surface_type)
+
+spectra_wide
+```
+
+```{r}
+library(tidymodels)
+library(dplyr)
+
+# 1. Clean data: remove Inf/-Inf/NA
+spectra_wide <- spectra_wide %>%
+  mutate(across(where(is.numeric), ~ na_if(., Inf))) %>%
+  mutate(across(where(is.numeric), ~ na_if(., -Inf))) %>%
+  drop_na()
+
+# 2. Split (make sure factor levels match between train/test)
+set.seed(123)
+data_split <- initial_split(spectra_wide, prop = 0.7, strata = treatment)
+train_data <- training(data_split) %>%
+  mutate(treatment = droplevels(treatment))
+test_data <- testing(data_split) %>%
+  mutate(treatment = factor(treatment, levels = levels(train_data$treatment)))
+
+# 3. Recipe with PCA (safe now)
+rf_recipe <- recipe(treatment ~ ., data = train_data) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_pca(all_numeric_predictors(), num_comp = 20)
+
+# 4. Random forest model
+rf_model <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_model)
+
+# 5. Cross-validation folds
+set.seed(123)
+cv_folds <- vfold_cv(train_data, v = 3, strata = treatment)
+
+# 6. Tuning grid (light for speed)
+rf_grid <- grid_random(
+  mtry(range = c(2, 20)),
+  trees(range = c(200, 500)),
+  min_n(range = c(2, 10)),
+  size = 10
+)
+
+# 7. Tune
+rf_tuned <- tune_grid(
+  rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  metrics = metric_set(accuracy),
+  control = control_grid(save_pred = TRUE)
+)
+
+# 8. Best model
+best_rf <- select_best(rf_tuned, metric = "accuracy")
+final_rf <- finalize_workflow(rf_workflow, best_rf)
+
+# 9. Fit final model
+rf_fit <- fit(final_rf, data = train_data)
+
+# 10. Evaluate
+rf_results <- predict(rf_fit, test_data) %>%
+  bind_cols(test_data) %>%
+  metrics(truth = treatment, estimate = .pred_class)
+
+rf_conf_mat <- predict(rf_fit, test_data) %>%
+  bind_cols(test_data) %>%
+  conf_mat(truth = treatment, estimate = .pred_class)
+
+rf_results
+rf_conf_mat
+
+
+```
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+
+# 1) Get a plain contingency table from whatever you have
+cm_tbl <- if (inherits(rf_conf_mat, "conf_mat")) rf_conf_mat$table else rf_conf_mat
+
+# 2) Convert to a tidy data frame: Truth, Prediction, n
+cm_df <- as.data.frame(cm_tbl)
+
+# Handle common column name variants
+if (all(c("Var1","Var2","Freq") %in% names(cm_df))) {
+  names(cm_df)[1:3] <- c("Truth","Prediction","n")
+} else if (all(c("Reference","Prediction","Freq") %in% names(cm_df))) {
+  cm_df <- cm_df %>% rename(Truth = Reference, n = Freq)
+} else if ("Freq" %in% names(cm_df) && !"n" %in% names(cm_df)) {
+  cm_df <- cm_df %>% rename(n = Freq)
+}
+
+# Ensure factors, order rows top-to-bottom
+cm_df <- cm_df %>%
+  mutate(
+    Truth = factor(Truth, levels = rev(unique(Truth))),
+    Prediction = factor(Prediction, levels = unique(Prediction))
+  )
+
+
+# 3) Heatmap of counts with vertical x-axis labels
+p_counts <- ggplot(cm_df, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 4) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  coord_equal() +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(title = "Confusion Matrix (Counts)", 
+       x = "Predicted", y = "True", fill = "Count")
+
+print(p_counts)
+
+# 4) Heatmap of row-wise percentages with vertical x-axis labels
+cm_pct <- cm_df %>%
+  group_by(Truth) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+p_pct <- ggplot(cm_pct, aes(x = Prediction, y = Truth, fill = pct)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = scales::percent(pct, accuracy = 1)), size = 4) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  coord_equal() +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(title = "Confusion Matrix (Row %)", 
+       x = "Predicted", y = "True", fill = "Percent")
+
+print(p_pct)
+
+
+```
+
+```{r}
+ggsave(
+  filename = "../output/confusion_matrix_august_26.png",
+  plot = p_counts,
+  width = 6,
+  height = 4
+)
+```
+
+#Confusion matrix interpretation: Good at species-level grouping: The model does okay at saying “this is unplanted” vs “this is forage.” Weak at treatment-level discrimination: It can’t reliably tell control vs. dung vs. urine within the same forage species — likely because spectral differences between excreta treatments are subtle. Better signal in bare ground: Unplanted treatments have stronger, distinct spectral signatures compared to forages.
+
+Your random forest is capturing broad distinctions (species vs. unplanted) but confuses finer details (excreta type within species).
+
+```{r}
+ggsave(
+  filename = "../output/confusion_matrix_august_26.png",
+  plot = p_counts,
+  width = 6,
+  height = 4
+)
+
+```
+
+## Gitelson approach
+
+To increase accuracy of surface type classification: wave-length range λ from 520 to 585 nm and from 695 to 740 nm
+
+```{r}
+
+spectra_subset <- spectra_data_cleann %>%
+  filter((wave_length >= 1327 & wave_length <= 1345)|
+           (wave_length >= 1414 & wave_length <= 1450)
+         )
+  
+
+spectra_subset
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Convert long -> wide format
+spectra_wide <- spectra_subset %>%
+  select(sample_id, treatment, surface_type, wave_length, reflectance_percent) %>%
+  pivot_wider(
+    names_from = wave_length,
+    values_from = reflectance_percent,
+    names_prefix = "wl_"
+  )%>%
+  mutate(treatment = as.factor(treatment))
+
+# Remove sample_id if not needed, keep surface_type as label
+#spectra_wide <- spectra_wide %>%
+  #select(-sample_id) 
+
+spectra_wide
+```
+
+Each row = one sample, each column = one reflectance feature. This massively reduces training time.
+
+## Ensure consistent factor levels before split
+
+```{r}
+# Make sure treatment is factor and has all levels
+spectra_wide <- spectra_wide %>%
+  mutate(treatment = factor(treatment)) %>%
+  mutate(surface_type = factor(surface_type))%>%
+  droplevels()
+
+spectra_wide
+```
+
+## amendment treatment ()
+
+```{r}
+spectra_wide <- spectra_wide %>%
+  select(-sample_id) %>%
+  select(-surface_type)
+
+spectra_wide
+```
+
+```{r}
+library(tidymodels)
+library(dplyr)
+
+# 1. Clean data: remove Inf/-Inf/NA
+spectra_wide <- spectra_wide %>%
+  mutate(across(where(is.numeric), ~ na_if(., Inf))) %>%
+  mutate(across(where(is.numeric), ~ na_if(., -Inf))) %>%
+  drop_na()
+
+# 2. Split (make sure factor levels match between train/test)
+set.seed(123)
+data_split <- initial_split(spectra_wide, prop = 0.7, strata = treatment)
+train_data <- training(data_split) %>%
+  mutate(treatment = droplevels(treatment))
+test_data <- testing(data_split) %>%
+  mutate(treatment = factor(treatment, levels = levels(train_data$treatment)))
+
+# 3. Recipe with PCA (safe now)
+rf_recipe <- recipe(treatment ~ ., data = train_data) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_pca(all_numeric_predictors(), num_comp = 20)
+
+# 4. Random forest model
+rf_model <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_model)
+
+# 5. Cross-validation folds
+set.seed(123)
+cv_folds <- vfold_cv(train_data, v = 3, strata = treatment)
+
+# 6. Tuning grid (light for speed)
+rf_grid <- grid_random(
+  mtry(range = c(2, 20)),
+  trees(range = c(200, 500)),
+  min_n(range = c(2, 10)),
+  size = 10
+)
+
+# 7. Tune
+rf_tuned <- tune_grid(
+  rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  metrics = metric_set(accuracy),
+  control = control_grid(save_pred = TRUE)
+)
+
+# 8. Best model
+best_rf <- select_best(rf_tuned, metric = "accuracy")
+final_rf <- finalize_workflow(rf_workflow, best_rf)
+
+# 9. Fit final model
+rf_fit <- fit(final_rf, data = train_data)
+
+# 10. Evaluate
+rf_results <- predict(rf_fit, test_data) %>%
+  bind_cols(test_data) %>%
+  metrics(truth = treatment, estimate = .pred_class)
+
+rf_conf_mat <- predict(rf_fit, test_data) %>%
+  bind_cols(test_data) %>%
+  conf_mat(truth = treatment, estimate = .pred_class)
+
+rf_results
+rf_conf_mat
+
+
+```
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+
+# 1) Get a plain contingency table from whatever you have
+cm_tbl <- if (inherits(rf_conf_mat, "conf_mat")) rf_conf_mat$table else rf_conf_mat
+
+# 2) Convert to a tidy data frame: Truth, Prediction, n
+cm_df <- as.data.frame(cm_tbl)
+
+# Handle common column name variants
+if (all(c("Var1","Var2","Freq") %in% names(cm_df))) {
+  names(cm_df)[1:3] <- c("Truth","Prediction","n")
+} else if (all(c("Reference","Prediction","Freq") %in% names(cm_df))) {
+  cm_df <- cm_df %>% rename(Truth = Reference, n = Freq)
+} else if ("Freq" %in% names(cm_df) && !"n" %in% names(cm_df)) {
+  cm_df <- cm_df %>% rename(n = Freq)
+}
+
+# Ensure factors, order rows top-to-bottom
+cm_df <- cm_df %>%
+  mutate(
+    Truth = factor(Truth, levels = rev(unique(Truth))),
+    Prediction = factor(Prediction, levels = unique(Prediction))
+  )
+
+
+# 3) Heatmap of counts with vertical x-axis labels
+p_counts <- ggplot(cm_df, aes(x = Prediction, y = Truth, fill = n)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = n), size = 4) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  coord_equal() +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(title = "Confusion Matrix (Counts)", 
+       x = "Predicted", y = "True", fill = "Count")
+
+print(p_counts)
+
+# 4) Heatmap of row-wise percentages with vertical x-axis labels
+cm_pct <- cm_df %>%
+  group_by(Truth) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup()
+
+p_pct <- ggplot(cm_pct, aes(x = Prediction, y = Truth, fill = pct)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = scales::percent(pct, accuracy = 1)), size = 4) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  coord_equal() +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  labs(title = "Confusion Matrix (Row %)", 
+       x = "Predicted", y = "True", fill = "Percent")
+
+print(p_pct)
+
+
+```
+
+```{r}
+ggsave(
+  filename = "../output/improved_confusion_matrix_august_26.png",
+  plot = p_counts,
+  width = 6,
+  height = 4
+)
+```
