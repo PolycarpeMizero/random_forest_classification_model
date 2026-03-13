@@ -42,6 +42,7 @@ spectra_long <- map_dfr(csv_files, read_csv, show_col_types = FALSE)
 head(spectra_long)
 
 ```
+
 # EDA
 
 ```{r}
@@ -245,8 +246,6 @@ spectra_model <- spectra_wide %>%
 
 spectra_model
 ```
-
-
 
 ```{r}
 library(tidyverse)
@@ -600,8 +599,6 @@ predictions <- predict(final_fit, test_data) %>%
 accuracy(predictions, truth = treatment, estimate = .pred_class)
 conf_mat(predictions, truth = treatment, estimate = .pred_class)
 ```
-
-
 
 # Random Forest classification for all three targets:
 
@@ -984,13 +981,7 @@ registerDoSEQ()
 
 
 
+```{r}
 
-
-
-
-
-
-
-
-
+```
 
