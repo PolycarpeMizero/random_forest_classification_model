@@ -1,0 +1,524 @@
+---
+title: "Spectral signature"
+format: html
+editor: visual
+---
+
+---
+title: "Spectral signature_june_23_2025"
+output: html_document
+author: "Polycarpe Mizero" 
+date: "June 23 2025"
+format:
+  html:
+    code-fold: false
+    embed-resources: true
+    toc: true
+    number-sections: false
+    theme: cerulean
+---
+
+# Set up
+
+```{r setup, message=FALSE, warning=FALSE}
+#install.packages("hms")
+#install.packages("fluxfinder")
+#install.packages("goflux")
+#install.packages("remotes")
+#remotes::install_github("COMPASS-DOE/fluxfinder", build_vignettes = TRUE)
+#install.packages("fuzzyjoin")
+#install.packages("tidyverse")
+
+library(readxl) # to read excel files
+library(janitor) # to clean data
+library(dplyr) # wrangling
+library(tidyr) # wrangling
+library(readr) # to export csv
+library(hms)
+library(ggplot2)
+library(fuzzyjoin)
+library(lme4)
+library(car)
+library(patchwork)
+library(tidyverse)
+library(ggplot2)
+library(viridis)
+library(emmeans)
+library(multcompView)
+
+```
+
+## The general plan
+
+✅ load all 60 spectral .csv (or .txt) files ✅ plot individual spectral signatures ✅ combine them for overall plots ✅ compute NDVI ✅ summarize reflectance ranges ✅ compare NDVI by treatment with ANOVA ✅ optionally run regressions of NDVI on treatments ✅ visualize with ggplot as in your attached figure
+
+Plot
+
+Individual reflectance curves.
+
+Then overlay all 60.
+
+```{r data cleaning}
+gh <- read_csv ("../data/20250623_text file/al_cont_104.csv")
+
+gh
+
+```
+
+# Data wrangling
+
+```{r}
+gh_1 <- clean_names(gh)
+
+head(gh_1)
+```
+
+```{r select necessary columns}
+gh_w <- gh_1 %>%
+  dplyr::select(wave_length = wvl, reflectance_percent = reflect_percent)
+
+head(gh_w)
+```
+
+```{r}
+summary(gh_w)
+```
+
+```{r}
+glimpse(gh_w)
+```
+
+```{r single_plot}
+ggplot(data = gh_w,
+       aes(x = wave_length,
+           y = reflectance_percent)) + 
+  geom_line(color="darkgreen") +
+  labs(title = "Reflectance variation",
+       x = "Wave length (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+
+```
+
+## Load all 60 files into one dataframe
+
+```{r message=FALSE, warning=FALSE}
+files <- list.files("../data/20250623_text file/", pattern = "*.csv", full.names = TRUE)
+
+# Read and combine, extracting treatment info from filename
+spectra_data <- files %>% 
+  map_df(~{
+    df <- read_csv(.x)
+    df$FileName <- basename(.x)
+    df
+  })
+
+```
+
+## Extract treatment info from filenames
+
+split be_D_1.csv to Forage=be, Treatment=D
+
+```{r}
+spectra_data <- spectra_data %>%
+  mutate(Forage = str_extract(FileName, "^[^_]+"),
+         Treatment = str_extract(FileName, "(?<=_)[^_]+"),
+         SampleID = str_remove(FileName, ".csv"))
+
+head(spectra_data)
+```
+
+## data wrangling
+
+```{r}
+spectra_data <- spectra_data %>%
+  clean_names() %>%
+rename(wave_length = wvl, reflectance_percent = reflect_percent)
+
+spectra_data
+```
+
+```{r}
+summary(spectra_data$reflectance_percent)
+```
+
+## Plot individual spectral signatures
+
+```{r}
+spectra_data %>% 
+  filter(sample_id == "un_u_101") %>%
+  ggplot(aes(x = wave_length, y = reflectance_percent)) +
+  geom_line(color="darkgreen") +
+  labs(title = "Spectral signature for un_u_101") +
+  theme_minimal()
+
+```
+
+```{r}
+spectra_data %>% 
+  filter(
+    sample_id == "un_u_101",
+    wave_length <= 1100
+  ) %>%
+  ggplot(aes(x = wave_length, y = reflectance_percent)) +
+  geom_line(color = "darkgreen") +
+  labs(title = "Spectral signature for un_u_101") +
+  theme_minimal()
+
+```
+
+## plot for small multiples
+
+```{r}
+spectra_data %>%
+  ggplot(aes(x = wave_length, y = reflectance_percent, color = forage)) +
+  geom_line() +
+  facet_wrap(~sample_id) +
+  theme_minimal() +
+  labs(title = "Spectral variation for all treatments",
+       x = "Wave length (nm)",
+       y = "Reflectance (%))",
+       fill = "Forage species")
+
+```
+
+## combined plot of all samples
+
+```{r}
+ggplot(spectra_data, aes(x = wave_length, y = reflectance_percent, group = sample_id, color = treatment)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  labs(title = "Spectral signatures for all samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+
+```
+
+```{r}
+spectra_data %>%
+ filter(wave_length <= 1450) %>% 
+ggplot(aes(x = wave_length, y = reflectance_percent, group = sample_id, color = treatment)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  labs(title = "Spectral signatures for all samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal() 
+  
+```
+
+Spectral curves show the classic vegetation signature: low reflectance in the red (around 670 nm) due to chlorophyll absorption, sharp rise at the red edge (\~700 nm), and plateau in NIR (800-1100 nm).
+
+```{r}
+ggsave("../output/all_spectral_june_23.png",
+       width = 6,
+       height = 4
+       )
+```
+
+## combined plot by forage species
+
+```{r}
+ggplot(spectra_data, aes(x = wave_length, y = reflectance_percent, group = sample_id, color = treatment)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  facet_wrap(~forage) +
+  labs(title = "Spectral signatures for all samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+```
+
+```{r}
+spectra_data %>%
+  filter(wave_length <= 1450) %>% 
+ggplot(aes(x = wave_length, y = reflectance_percent, group = sample_id, color = treatment)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  facet_wrap(~forage) +
+  labs(title = "Spectral signatures for all forage samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+```
+
+```{r}
+ggsave("../output/spectral_by_forage_june_23.png",
+       width = 6,
+       height = 4
+       )
+```
+
+## combined plot by treatments applied
+
+```{r}
+ggplot(spectra_data, aes(x = wave_length, y = reflectance_percent, group = sample_id, color = forage)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  facet_wrap(~treatment) +
+  labs(title = "Spectral signatures for all treatment samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)") +
+  theme_minimal()
+```
+
+```{r}
+spectra_data %>%
+  filter(wave_length <= 1450) %>% 
+ggplot(aes(x = wave_length, y = reflectance_percent, group = sample_id, color = forage)) +
+  geom_line(alpha = 0.8) +
+  scale_color_viridis_d() +
+  facet_wrap(~treatment) +
+  labs(title = "Spectral signatures for all treatment samples",
+       x = "Wavelength (nm)",
+       y = "Reflectance (%)",
+       fill = "Forage species") +
+  theme_minimal()
+```
+
+```{r}
+ggsave("../output/spectral_by_treatment_june_23.png",
+       width = 6,
+       height = 4
+       )
+```
+
+## Calculate NDVI
+
+NDVI is usually: NDVI = (NIR - Red) / (NIR + Red) where typically: NIR = reflectance at \~800 nm Red = reflectance at \~670 nm
+
+### Computing NDVI for each sample
+
+Get values nearest 670 and 800 nm:
+
+```{r}
+# Define wavelengths for NDVI
+nir_band <- 800
+red_band <- 670
+
+# Compute NDVI per sample and extract rep
+ndvi_data <- spectra_data %>%
+  filter(wave_length %in% c(red_band, nir_band)) %>%
+  dplyr::select(sample_id, forage, treatment, wave_length, reflectance_percent) %>%
+  mutate(reflectance_percent = reflectance_percent / 100) %>%
+  pivot_wider(names_from = wave_length, values_from = reflectance_percent, names_prefix = "wl_") %>%
+  mutate(
+    NDVI = (wl_800 - wl_670) / (wl_800 + wl_670),
+    rep = substr(str_extract(sample_id, "\\d+$"), 1, 1)  # Extract first digit of numeric part
+  ) %>%
+  mutate(rep = as.integer(rep))  # Convert to numeric if needed
+
+ndvi_data
+
+
+#summary(ndvi_data)
+
+```
+
+Reflectance values were in percent (%), we rescaled the reflectance to be on a 0–1 scale.
+
+NDVI was calculated using reflectance at 670 nm (red band) and 800 nm (near-infrared band). These wavelengths capture the strong red absorption by chlorophyll and high NIR reflectance of healthy vegetation, making NDVI a sensitive index of canopy biomass and vigor.
+
+## Show NDVI summary table by treatment
+
+```{r message=FALSE}
+ndvi_summary <- ndvi_data %>%
+  group_by(forage, treatment) %>%
+  summarise(
+    mean_NDVI = round(mean(NDVI, na.rm = TRUE), 2),
+    sd_NDVI   = round(sd(NDVI, na.rm = TRUE), 2),
+    min_NDVI  = round(min(NDVI, na.rm = TRUE), 2),
+    max_NDVI  = round(max(NDVI, na.rm = TRUE), 2)
+  )
+
+ndvi_summary
+
+ndvi_filtered <- ndvi_summary %>%
+  dplyr::select(forage, treatment, mean_NDVI)
+
+ndvi_filtered
+```
+
+```{r}
+write.csv(ndvi_filtered, "../output/NDVI table.csv", row.names = TRUE)
+```
+
+## plot NDVI by treatment
+
+```{r}
+ggplot(ndvi_data, aes(x = interaction(forage, treatment), y = NDVI, fill = treatment)) +
+  geom_boxplot() +
+  scale_fill_viridis_d() +
+  labs(title = "NDVI by forage and treatment", 
+       x = "Forage + Treatment", 
+       y = "NDVI",
+       fill = "Treatment") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+ggsave("../output/NDVI_june_23.png",
+       width = 6,
+       height = 4
+       )
+```
+
+## ANOVA and NDVI
+
+```{r}
+# Load packages (if not already loaded)
+library(lme4)
+library(car)
+
+# Optional: combine factors for visualization
+ndvi_data <- ndvi_data %>%
+  mutate(Group = paste(forage, treatment, sep = "+"))
+
+# Fit mixed-effects model
+# Fixed: forage, treatment
+# Random: rep
+ndvi_mod <- lmer(NDVI ~ forage * treatment + (1 | rep), data = ndvi_data)
+
+# Type III ANOVA using car
+anova_table <- Anova(ndvi_mod, type = 3)
+
+# Convert to data frame
+#anova_df <- as.data.frame(anova_table)
+
+# Round numeric values to 2 decimal places (optional but cleaner)
+#anova_df <- data.frame(lapply(anova_df, function(x) {
+#  if (is.numeric(x)) round(x, 2) else x
+#}), row.names = rownames(anova_table))
+
+write.csv(anova_table, "../output/spectral_NDVI_anova_table_june_23.csv", row.names = TRUE)
+
+anova_table
+
+
+```
+
+## Estimated Marginal Means (emmeans)
+
+```{r}
+library(emmeans)
+library(multcompView)
+
+ndvi_means <- emmeans(ndvi_mod, ~ forage * treatment)
+
+ndvi_means
+```
+
+## pairwise comparison
+
+```{r message=FALSE}
+library(multcomp)
+
+ndvi_cld <- cld(ndvi_means, Letters = letters, adjust = "none")
+ndvi_cld
+```
+
+The table above shows the estimated marginal means (EMMeans) of NDVI across your treatment groups. \## Interpretation of NDVI Grouping \### Low NDVI group – “a” un+u, un+cont, un+d, and al+d are all in group "a".
+
+These combinations have the lowest NDVI values, likely reflecting:
+
+Unplanted plots (no photosynthetic canopy), even with urine or dung.
+
+Alfalfa + dung also remained low — possibly due to slow canopy development or stress.
+
+###🔹 Moderate NDVI group – “b to c” cra+d and al+u appear in "b" and "bc", indicating moderate NDVI:
+
+Crabgrass + dung shows some canopy development.
+
+Alfalfa + urine boosts NDVI, likely due to nitrogen availability.
+
+###🔹 High NDVI group – “c to e” be+d, cra+cont, al+cont, be+cont, be+u, and cra+u are in "c", "d", and "e":
+
+These plots have well-established canopies, especially with bermudagrass and crabgrass.
+
+Urine and control plots generally outperform dung in NDVI response, suggesting that rapid N availability in urine supports faster greening and photosynthesis.
+
+## Key Takeaways
+
+Unplanted plots remain consistently low in NDVI, regardless of treatment → no canopy = low photosynthesis.
+
+Dung treatments tend to have lower NDVI than urine and control, possibly due to delayed nutrient release or surface smothering.
+
+Urine and control treatments on bermudagrass (be) and crabgrass (cra) produce the highest NDVI, indicating vigorous growth and high chlorophyll content.
+
+Alfalfa responses vary: low with dung, moderate with urine, higher with control.
+
+## Conclusion:
+
+NDVI clearly differentiates forage and treatment interactions, with the greatest canopy vigor in bermudagrass and crabgrass under urine or no application, and lowest NDVI in unplanted and dung-treated plots.
+
+## final plot
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Suppose ndvi_data has the raw NDVI observations and 'Group' column
+# And ndvi_cld has the summary means + .group letters
+
+ ndvi_data = ndvi_filtered %>%
+   mutate(Group = interaction(forage, treatment, sep = "+"))
+ 
+ ndvi_cld = ndvi_cld %>%
+   mutate(Group = interaction(forage, treatment, sep = "+"))
+
+# Merge the letters onto your raw data for easy plotting
+ndvi_plot_data <- ndvi_data %>%
+  left_join(ndvi_cld, by = "Group")
+
+# Now plot
+ggplot(ndvi_plot_data, aes(x = reorder(Group, mean_NDVI, median), y = mean_NDVI, fill = treatment.y)) +
+  geom_boxplot() +
+  geom_jitter(data = ndvi_plot_data, aes(x = reorder(Group, mean_NDVI, median), y = mean_NDVI)) +
+  geom_label(data = ndvi_cld,
+           aes(x = Group,
+               y = emmean,
+               label = .group),
+           inherit.aes = FALSE,
+    size = 5,
+    vjust = 0
+  ) +
+  labs(
+    title = "NDVI by Treatment Group with Letter Groupings",
+    x = "Forage + Treatment",
+    y = "NDVI",
+    fill = "Treatment"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )+
+  coord_cartesian(ylim = c(0, 1.1))
+
+
+```
+
+ANOVA and pair-wise comparison show statistically significant differences in NDVI between forage + treatment groups.
+
+Bermudagrass and crabgrass consistently showed the highest canopy vigor (NDVI), especially under urine application and control conditions. Unplanted plots had significantly lower NDVI regardless of amendment, highlighting the combined importance of forage establishment and nutrient treatments in driving canopy development.
+
+```{r}
+ggsave("../output/spectral_ANOVA_june_23.png",
+       width = 6,
+       height = 4
+       )
+```
+
+## Regression
+
+predict NDVI by Treatment and Forage separately.
+
+```{r}
+ndvi_reg <- lm(NDVI ~ forage + treatment, data = ndvi_data)
+
+ndvi_reg
+
+summary(ndvi_reg)
+
+```
