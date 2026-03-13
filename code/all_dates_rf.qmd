@@ -18,16 +18,23 @@ format:
     theme: cerulean
 ---
 
-# seup
+
+#1 seup
 
 ```{r warning=FALSE message=F }
+
+# 1 Load Required Libraries
+
 library(tidyverse)
 library(tidymodels)
 library(ranger)
 library(fs)
 ```
 
-# Load and Combine All CSV Files
+
+#2 Load and Combine All CSV Files
+
+
 
 ```{r}
 # folder containing the CSV files
@@ -43,7 +50,9 @@ head(spectra_long)
 
 ```
 
-# EDA
+
+#3 EDA
+
 
 ```{r}
 summary(spectra_long)
@@ -53,7 +62,9 @@ summary(spectra_long)
 glimpse(spectra_long)
 ```
 
-# Pivot to Wide Format (Required for Random Forest)
+
+#4 Pivot to Wide Format (Required for Random Forest)
+
 
 Each wavelength becomes a predictor. Each row = one sample, each column = one reflectance feature. This massively reduces training time.
 
@@ -86,7 +97,7 @@ spectra_wide <- spectra_wide %>%
 spectra_wide
 ```
 
-#Last application date
+## Last application date
 
 ```{r}
 library(tidyverse)
@@ -130,11 +141,13 @@ spectra_wide <- spectra_wide %>%
 spectra_wide
 ```
 
-# 5. RF CLASSIFICATION MODEL
+#5 RF CLASSIFICATION MODEL
 
-#4 Spectral model with DAA added
+## Spectral model with DAA added
+
 
 Note: Random Forest predictors should only be spectral features.
+
 
 ```{r}
 spectra_model <- spectra_wide %>%
@@ -227,13 +240,15 @@ conf_mat(predictions, truth = forage, estimate = .pred_class)
 
 The formula forage \~ . already includes every other column as a predictor. So if DAA is in spectra_model, it is automatically included.
 
+
 # Predicting surface type
 
 ## Option 1: Higher accuracy model
 
 This includes forage, treatment, DAA, and spectra.
 
-## model_surface_type
+
+## model_1: predicting_surface_type (treatment included)
 
 ```{r}
 spectra_model <- spectra_wide %>%
@@ -246,6 +261,10 @@ spectra_model <- spectra_wide %>%
 
 spectra_model
 ```
+
+
+This includes forage, treatment, DAA, and spectra.
+
 
 ```{r}
 library(tidyverse)
@@ -381,7 +400,9 @@ surface_acc$.estimate
 
 ## Option 2: Cleaner spectral-only model
 
+
 This is would be a better choice if we want to say the model classified surface_type based mainly on hyperspectral response plus time since application.
+
 
 ```{r}
 library(tidyverse)
@@ -962,7 +983,19 @@ cat("\nConfusion matrix - treatment with DAA:\n")
 print(results_treatment_with_daa$confusion_matrix)
 
 # ---------------------------
-# 11. Save outputs if needed
+
+# 11. Stop parallel backend
+# ---------------------------
+stopCluster(cl)
+registerDoSEQ()
+```
+
+
+
+
+
+```{r}
+#Save outputs 
 # ---------------------------
 # write_csv(model_summary, "rf_accuracy_summary.csv")
 # write_csv(kappa_summary, "rf_kappa_summary.csv")
@@ -972,16 +1005,6 @@ print(results_treatment_with_daa$confusion_matrix)
 # write_csv(results_treatment_with_daa$variable_importance, "rf_varimp_treatment_with_daa.csv")
 
 # ---------------------------
-# 12. Stop parallel backend
-# ---------------------------
-stopCluster(cl)
-registerDoSEQ()
 ```
 
-
-
-
-```{r}
-
-```
 
