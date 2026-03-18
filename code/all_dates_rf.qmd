@@ -260,6 +260,8 @@ spectra_model <- spectra_wide %>%
   select(surface_type, DAA, starts_with("wl_"))
 
 spectra_model
+
+#anyNA(spectra_model)
 ```
 
 
@@ -691,6 +693,15 @@ model_base <- spectra_wide %>%
 
 cat("Number of wavelength predictors retained:", length(wl_keep), "\n")
 
+# Remove columns that contain any NA
+na_cols <- colSums(is.na(model_base))
+bad_cols <- names(na_cols[na_cols > 0])
+
+cat("Removing", length(bad_cols), "columns with NA values\n")
+
+model_base <- model_base %>%
+  select(-all_of(bad_cols))
+
 # ---------------------------
 # 4. Start parallel processing
 # ---------------------------
@@ -739,9 +750,10 @@ run_rf_model <- function(data, outcome, strata_var = NULL, seed = 123,
 
   # Recipe
   rf_recipe <- recipe(formula = as.formula(paste(rlang::as_name(outcome), "~ .")), data = train_data) %>%
-    # Remove identifiers that should not be used as predictors
-    update_role(date, sample_id, new_role = "id") %>%
-    step_zv(all_predictors())
+  update_role(date, sample_id, new_role = "id") %>%
+  step_naomit(all_predictors(), all_outcomes()) %>%
+  step_zv(all_predictors()) %>%
+  step_nzv(all_predictors())
 
   # Model
   rf_model <- rand_forest(
@@ -802,11 +814,12 @@ run_rf_model <- function(data, outcome, strata_var = NULL, seed = 123,
 
   # Variable importance
   rf_engine <- extract_fit_parsnip(final_fit)$fit
-  var_imp <- tibble(
-    variable = names(rf_engine$variable.importance),
-    importance = as.numeric(rf_engine$variable.importance)
-  ) %>%
-    arrange(desc(importance))
+ var_imp <- tibble(
+  variable = names(rf_engine$variable.importance),
+  importance = as.numeric(rf_engine$variable.importance)
+) %>%
+  filter(!is.na(importance)) %>%
+  arrange(desc(importance))
 
   # Return everything
   list(
@@ -997,14 +1010,378 @@ registerDoSEQ()
 ```{r}
 #Save outputs 
 # ---------------------------
-# write_csv(model_summary, "rf_accuracy_summary.csv")
-# write_csv(kappa_summary, "rf_kappa_summary.csv")
-# write_csv(results_surface_type$variable_importance, "rf_varimp_surface_type.csv")
-# write_csv(results_forage$variable_importance, "rf_varimp_forage.csv")
-# write_csv(results_treatment_no_daa$variable_importance, "rf_varimp_treatment_no_daa.csv")
-# write_csv(results_treatment_with_daa$variable_importance, "rf_varimp_treatment_with_daa.csv")
+# write_csv(model_summary, "../output/rf_accuracy_summary.csv")
+# write_csv(kappa_summary, "../output/rf_kappa_summary.csv")
+# write_csv(results_surface_type$variable_importance, "../output/rf_varimp_surface_type.csv")
+# write_csv(results_forage$variable_importance, "../output/rf_varimp_forage.csv")
+# write_csv(results_treatment_no_daa$variable_importance, "../output/rf_varimp_treatment_no_daa.csv")
+# write_csv(results_treatment_with_daa$variable_importance, "../output/rf_varimp_treatment_with_daa.csv")
 
 # ---------------------------
 ```
+
+
+Three essential figures for hyperspectral classification
+
+1.  Spectral reflectance curves by class
+2.  Random Forest variable importance plot
+3.  Confusion matrix heatmap
+
+
+# 1. Spectral reflectance curves by class
+
+## Reflectance curves by surface_type
+
+
+```{r}
+library(tidyverse)
+
+# Convert wide spectra back to long format for plotting
+spectra_long_plot <- spectra_wide %>%
+  mutate(surface_type = as.factor(surface_type)) %>%
+  select(surface_type, starts_with("wl_")) %>%
+  pivot_longer(
+    cols = starts_with("wl_"),
+    names_to = "wavelength",
+    values_to = "reflectance"
+  ) %>%
+  mutate(
+    wavelength = readr::parse_number(wavelength)
+  )
+
+# Summarize mean and SD by class and wavelength
+spectral_summary_surface <- spectra_long_plot %>%
+  filter(wavelength <= 1450)%>%
+  group_by(surface_type, wavelength) %>%
+  summarise(
+    mean_reflectance = mean(reflectance, na.rm = TRUE),
+    sd_reflectance = sd(reflectance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Plot
+p_spectral_surface <- ggplot(
+  spectral_summary_surface,
+  aes(x = wavelength, y = mean_reflectance, color = surface_type, fill = surface_type)
+) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(
+    aes(
+      ymin = mean_reflectance - sd_reflectance,
+      ymax = mean_reflectance + sd_reflectance
+    ),
+    alpha = 0.15,
+    color = NA
+  ) +
+  labs(
+    title = "Spectral Reflectance Curves by Surface Type",
+    x = "Wavelength (nm)",
+    y = "Reflectance (%)",
+    color = "Surface type",
+    fill = "Surface type"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+p_spectral_surface
+```
+
+
+## reflectance curves by forage
+
+```{r}
+spectra_long_forage <- spectra_wide %>%
+  mutate(forage = as.factor(forage)) %>%
+  select(forage, starts_with("wl_")) %>%
+  pivot_longer(
+    cols = starts_with("wl_"),
+    names_to = "wavelength",
+    values_to = "reflectance"
+  ) %>%
+  mutate(
+    wavelength = readr::parse_number(wavelength)
+  )
+
+spectral_summary_forage <- spectra_long_forage %>%
+  filter(wavelength <= 1450)%>%
+  group_by(forage, wavelength) %>%
+  summarise(
+    mean_reflectance = mean(reflectance, na.rm = TRUE),
+    sd_reflectance = sd(reflectance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+p_spectral_forage <- ggplot(
+  spectral_summary_forage,
+  aes(x = wavelength, y = mean_reflectance, color = forage, fill = forage)
+) +
+  geom_line(linewidth = 1) +
+  geom_ribbon(
+    aes(
+      ymin = mean_reflectance - sd_reflectance,
+      ymax = mean_reflectance + sd_reflectance
+    ),
+    alpha = 0.15,
+    color = NA
+  ) +
+  labs(
+    title = "Spectral Reflectance Curves by Forage Type",
+    x = "Wavelength (nm)",
+    y = "Reflectance (%)",
+    color = "Forage",
+    fill = "Forage"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+p_spectral_forage
+```
+
+
+#2. Random Forest variable importance plot
+
+Random Forest variable importance tells you which predictors (wavelengths, DAA, etc.) were most useful for making correct classifications. In other words, which wavelengths (or variables like DAA) most helped the model distinguish between surface types? i.e those wavelengths were repeatedly used by the trees and they led to better class separation (e.g., dung vs forage)
+
+## Variable importance for surface_type
+
+```{r warning=FALSE}
+var_imp_surface <- results_surface_type$variable_importance %>%
+  mutate(
+    wavelength_num = readr::parse_number(variable)
+  ) %>%
+  filter(
+    !is.na(importance),        # remove NA importance
+    !is.na(wavelength_num)     # remove non-wavelength variables like DAA
+  )
+
+p_varimp_surface <- var_imp_surface %>%
+  slice_max(order_by = importance, n = 20) %>%
+  ggplot(aes(x = reorder(wavelength_num, importance), y = importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 20 Important Wavelengths for Surface Type Classification",
+    x = "Wavelength (nm)",
+    y = "Variable importance"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold")
+  )
+
+p_varimp_surface
+```
+
+## only wavelength predictors in the importance plot
+
+```{r}
+var_imp_surface_wl <- results_surface_type$variable_importance %>%
+  filter(str_detect(variable, "^wl_")) %>%
+  mutate(
+    wavelength_num = readr::parse_number(variable)
+  )
+
+p_varimp_surface_wl <- var_imp_surface_wl %>%
+  slice_max(order_by = importance, n = 20) %>%
+  ggplot(aes(x = reorder(wavelength_num, importance), y = importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 20 Important Wavelengths for Surface Type Classification",
+    x = "Wavelength (nm)",
+    y = "Variable importance"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold")
+  )
+
+p_varimp_surface_wl
+```
+
+
+## Variable importance for forage
+
+```{r}
+var_imp_forage <- results_forage$variable_importance %>%
+  filter(str_detect(variable, "^wl_")) %>%
+  mutate(wavelength_num = readr::parse_number(variable))
+
+p_varimp_forage <- var_imp_forage %>%
+  slice_max(order_by = importance, n = 20) %>%
+  ggplot(aes(x = reorder(wavelength_num, importance), y = importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 20 Important Wavelengths for Forage Classification",
+    x = "Wavelength (nm)",
+    y = "Variable importance"
+  ) +
+  theme_bw()
+
+p_varimp_forage
+```
+
+
+## Variable importance for treatment_with_DAA
+
+```{r}
+var_imp_treatment_with_daa <- results_treatment_with_daa$variable_importance %>%
+  filter(str_detect(variable, "^wl_")) %>%
+  mutate(wavelength_num = readr::parse_number(variable))
+
+p_varimp_treatment_with_daa <- var_imp_treatment_with_daa %>%
+  slice_max(order_by = importance, n = 20) %>%
+  ggplot(aes(x = reorder(wavelength_num, importance), y = importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 20 Important Wavelengths for Forage Classification",
+    x = "Wavelength (nm)",
+    y = "Variable importance"
+  ) +
+  theme_bw()
+
+p_varimp_treatment_with_daa
+```
+
+
+## Variable importance for treatment_no_DAA
+
+```{r}
+var_imp_treatment_no_daa <- results_treatment_no_daa$variable_importance %>%
+  filter(str_detect(variable, "^wl_")) %>%
+  mutate(wavelength_num = readr::parse_number(variable))
+
+p_varimp_treatment_no_daa <- var_imp_treatment_no_daa %>%
+  slice_max(order_by = importance, n = 20) %>%
+  ggplot(aes(x = reorder(wavelength_num, importance), y = importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Top 20 Important Wavelengths for Forage Classification",
+    x = "Wavelength (nm)",
+    y = "Variable importance"
+  ) +
+  theme_bw()
+
+p_varimp_treatment_no_daa
+```
+
+
+
+#3. Confusion matrix heatmap
+
+First convert the object of the confusion matrix stored in each results list to data frame and plot it.
+
+## Confusion matrix heatmap for surface_type
+
+```{r}
+cm_surface <- as.data.frame(results_surface_type$confusion_matrix$table)
+colnames(cm_surface) <- c("Truth", "Prediction", "Freq")
+
+p_cm_surface <- ggplot(cm_surface, aes(x = Prediction, y = Truth, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), size = 4) +
+  labs(
+    title = "Confusion Matrix Heatmap for Surface Type Classification",
+    x = "Predicted class",
+    y = "Reference class",
+    fill = "Count"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+p_cm_surface
+```
+
+## Confusion matrix heatmap_percentage
+
+This shows class-wise proportions
+
+```{r}
+cm_surface_pct <- cm_surface %>%
+  group_by(Truth) %>%
+  mutate(Percentage = (Freq / sum(Freq)) * 100)
+
+p_cm_surface_pct <- ggplot(cm_surface_pct, aes(x = Prediction, y = Truth, fill = Percentage)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), size = 4) +
+  labs(
+    title = "Confusion Matrix (%) for Surface Type Classification",
+    x = "Predicted class",
+    y = "Reference class",
+    fill = "Percentage (%)"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+p_cm_surface_pct
+```
+
+
+## Confusion matrix for forage
+
+```{r}
+cm_forage <- as.data.frame(results_forage$confusion_matrix$table)
+colnames(cm_forage) <- c("Truth", "Prediction", "Freq")
+
+p_cm_forage <- ggplot(cm_forage, aes(x = Prediction, y = Truth, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), size = 4) +
+  labs(
+    title = "Confusion Matrix Heatmap for Forage Classification",
+    x = "Predicted class",
+    y = "Reference class",
+    fill = "Count"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+p_cm_forage
+```
+
+
+## Confusion matrix for forage
+
+```{r}
+cm_forage_pct <- cm_forage %>%
+  group_by(Truth) %>%
+  mutate(Percentage = (Freq / sum(Freq)) * 100)
+
+p_cm_forage_pct <- ggplot(cm_forage_pct, aes(x = Prediction, y = Truth, fill = Percentage)) +
+  geom_tile() +
+  geom_text(aes(label = paste0(round(Percentage, 1), "%")), size = 4) +
+  labs(
+    title = "Confusion Matrix (%) for Forage Type Classification",
+    x = "Predicted class",
+    y = "Reference class",
+    fill = "Percentage (%)"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+p_cm_forage_pct
+```
+
+
 
 
